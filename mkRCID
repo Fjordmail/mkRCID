@@ -1,0 +1,147 @@
+#!/bin/bash
+set -e
+#set -x
+
+#######################################
+#	Create new identity in Roundcube
+#		mkRCID user_name new_alias
+#
+#	Arguments:
+#		username (string): user's standard e-mail
+#		new_alias (string): user's new alias
+#	Returns:
+#		0 upon success
+#		>=1 upon error
+#######################################
+function main() {
+	local readonly USAGE="Usage: mkRCID user_name new_alias"
+
+	if [[ "${#}" -ne 2 ]]; then
+		err "Error: two arguments expected, ${#} received"
+		err "${USAGE}"
+		return 1
+	fi
+
+	local readonly user_name="${1}"
+	local readonly new_alias="${2}"
+
+	if [[ ! -f .env ]]; then
+		err "Error: could not find .env file"
+		return 3
+	fi
+
+	# Load .env
+	set -o allexport && source .env && set +o allexport
+
+	check_duplicates "${new_alias}"					# Check if identity already exists
+	local readonly user_id=$(get_user_id "${user_name}")		# Find user_id
+	aks_confirmation "${user_name}" "${new_alias}" "${user_id}"	# Display existing identities and ask for confirmation
+	insert_new "${new_alias}" "${user_id}" 				# Create the RCID
+
+	return 0
+}
+
+#######################################
+#	Check in identities
+#	if the alias is already there
+#######################################
+function check_duplicates() {
+	[[ "${#}" -ne 1 ]] && return 1
+	local readonly new_alias="${1}"
+
+	# Check if identity already exists
+	local readonly check_identity=$( \
+		mysql --skip-column-names \
+			--user="${CONFIG_USER}" --password="${CONFIG_PASSWORD}" --database="${CONFIG_DATABASE}" \
+			--execute="SELECT * FROM identities WHERE email='${new_alias}'" \
+	)
+
+	if [[ ! -z "${check_identity}" ]]; then
+		err "Error: identity with alias '${new_alias}' already exists:"
+		echo "${check_identity}"
+		return 4
+	fi
+
+	return 0
+}
+
+#######################################
+#	Fetch user_id from users
+#######################################
+function get_user_id() {
+	[[ "${#}" -ne 1 ]] && return 1
+	local readonly user_name="${1}"
+
+	local readonly user_id=$( \
+		mysql --skip-column-names \
+			--user="${CONFIG_USER}" --password="${CONFIG_PASSWORD}" --database="${CONFIG_DATABASE}" \
+			--execute="SELECT user_id FROM users WHERE username='${user_name}'" \
+	)
+
+	if [[ -z "${user_id}" ]]; then
+		err "Error: user '${user_name}' not found"
+		return 5
+	fi
+
+	echo "${user_id}"
+
+	return 0
+}
+
+#######################################
+#	Display existing IDs and
+#	ask user for confirmation
+#######################################
+function aks_confirmation() {
+	[[ "${#}" -ne 3 ]] && return 1
+	local readonly user_name="${1}"
+	local readonly new_alias="${2}"
+	local readonly user_id="${3}"
+
+	mysql --user="${CONFIG_USER}" --password="${CONFIG_PASSWORD}" --database="${CONFIG_DATABASE}" \
+		--execute="SELECT standard, email FROM identities WHERE user_id='${user_id}'"
+
+	warn "\nFound the above existing identities for '${user_name}'.\nProceed and create '${new_alias}'?"
+
+	return 0
+}
+
+#######################################
+#	Insert new ID
+#######################################
+function insert_new() {
+	[[ "${#}" -ne 2 ]] && return 1
+	local readonly new_alias="${1}"
+	local readonly user_id="${2}"
+
+	# Create new identity
+	echo -e "\nAdding new identity..."
+
+	mysql --user="${CONFIG_USER}" --password="${CONFIG_PASSWORD}" --database="${CONFIG_DATABASE}" \
+		--execute="\
+			INSERT INTO \
+				\`identities\` (\`identity_id\`, \`user_id\`, \`changed\`, \`del\`, \`standard\`, \`name\`, \`organization\`, \`email\`, \`reply-to\`, \`bcc\`, \`signature\`, \`html_signature\`) \
+			VALUES (NULL, '${user_id}', NOW(), 0, 0, '', '', '${new_alias}', '', '', NULL, 0) \
+		"
+
+	return 0
+}
+
+#######################################
+#	Print error message to stderr
+#	https://google.github.io/styleguide/shellguide.html
+#######################################
+function err() {
+	echo [2021-09-10T11:32:07+0200]: "${*}" >&2
+}
+
+#######################################
+#	Warn user and ask for confirmation
+#######################################
+function warn() {
+	echo -e "${*}"
+	echo -n "Press any key to continue or ^C to abort."
+	read -s -n 1 key
+}
+
+main "${@}"; exit
